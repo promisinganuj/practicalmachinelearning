@@ -4,27 +4,144 @@ author: "Anuj Parashar"
 date: "2/13/2019"
 output: html_document
 ---
-
+    
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo = TRUE)
 ```
 
-## R Markdown
+## Predicting Personal Activity Effectiveness
 
-This is an R Markdown document. Markdown is a simple formatting syntax for authoring HTML, PDF, and MS Word documents. For more details on using R Markdown see <http://rmarkdown.rstudio.com>.
+### Objective
+The objective of this project is to predict the manner ("classe" variable) in which a group of people did physical exercise. We are going to analyze the "Weight Lifting Exercise" dataset that comes from this source: <http://web.archive.org/web/20161224072740/http:/groupware.les.inf.puc-rio.br/har>.
 
-When you click the **Knit** button a document will be generated that includes both content as well as the output of any embedded R code chunks within the document. You can embed an R code chunk like this:
+### Steps Involved
+For this analysis, the following steps would be followed:
+    
+1. Loading the data
+2. Cleaning the data
+3. Features Selection
+4. Creating testing and training sets
+5. Configuring parallel processing
+6. Adding cross-validation
+7. Train the Model
+8. Analyzing the Model
+9. Making predictions on test-set
+10. Calculating out-of-sample errors
+11. Quiz Result
 
-```{r cars}
-summary(cars)
+We will be discussing the design consideration and assumptions as we go along. So, let's get started.
+
+#### 1. **Loading the data**
+```{r echo=TRUE, eval=TRUE, message=FALSE}
+# Loading Libraries
+library(caret)
+library(parallel)
+library(doParallel)
+
+# Loading the files
+rawData   <- read.csv(file = "/Users/promisinganuj/Downloads/pml-training.csv", na.strings = c("#DIV/0!", "NA"))
+finalTest <- read.csv(file = "/Users/promisinganuj/Downloads/pml-testing.csv" , na.strings = c("#DIV/0!", "NA"))
+```
+We are going to use "caret" package for creating the model. The "parallel" package is used to enable parallelism while training the model. This is helpful as this dataset has lot of predictor variables as we are going to see next.
+```{r echo=TRUE, eval=TRUE, message=FALSE, comment=""}
+rbind(train = dim(rawData), test = dim(finalTest))
+```
+As shown above, there are 159 potential predictor variables (+1 predited variable).
+
+#### 2. **Cleaning the data**
+```{r echo=TRUE, eval=TRUE, message=FALSE, comment=""}
+rawData   <- rawData  [lapply(rawData  , function(x) sum(is.na(x)) / length(x)) < 0.05]
+finalTest <- finalTest[lapply(finalTest, function(x) sum(is.na(x)) / length(x)) < 0.05]
+rbind(train = dim(rawData), test = dim(finalTest))
+```
+The above step is based on the manual inspection of the datasets where lots of columns were either "NA" or sparsely populated. All such columns, which have < 5% values present, has been removed. That leaves us with 60 potential predictor variables.
+
+#### 3. **Features Selection**
+Most of the columns left are actual measurement values but there are certain columns that can be removed especially the timestamps, id and username. Let's look at these variables
+```{r echo=TRUE, eval=TRUE, message=FALSE, comment=""}
+head(rawData[,1:7], n = 2)
+```
+Let's also look at the "near zero variabiliy".
+```{r echo=TRUE, eval=TRUE, message=FALSE, comment=""}
+nsv <- nearZeroVar(rawData, saveMetrics = TRUE)
+head(nsv, n = 7)
+```
+Here, I have truncated the "nsv" but feel free to inspect the whole result. Looking at the above observation, following assumptions can be made:
+
+* The columns "new_window", "user_name" and "cvtd_timestamp" can be dropped due to their non-variablity.
+* Despite their high variability, the columns "X", "raw_timestamp_part_1" and "raw_timestamp_part_2" are removed based on our understanding of this dataset. Infact, if "X" is not removed, it will led the model to be wrongly trained with 100% accuracy.
+
+```{r echo=TRUE, eval=TRUE, message=FALSE, comment=""}
+dropCol   <- c("X","user_name","raw_timestamp_part_1","raw_timestamp_part_2","cvtd_timestamp","new_window")
+rawData   <- rawData[!names(rawData) %in% dropCol]
+finalTest <- finalTest[!names(finalTest) %in% dropCol]
+dim(rawData)
+```
+Lets verify that both the datasets are still structurally same
+```{r echo=TRUE, eval=TRUE, message=FALSE, comment=""}
+all(names(rawData[,-54]) == names(finalTest[,-54]))
 ```
 
-## Including Plots
+#### 4. **Creating training and test set**
+```{r echo=TRUE, eval=TRUE, message=FALSE, comment=""}
+set.seed(12465)
+inTrain <- createDataPartition(rawData$classe, p = 0.7, list = FALSE)
+training <- rawData[inTrain,]
+testing  <- rawData[-inTrain,]
+```
+Here we are doing a 70/30 split between training and test dataset.
 
-You can also embed plots, for example:
-
-```{r pressure, echo=FALSE}
-plot(pressure)
+#### 5. **Configuring parallel processing**
+As there are lots of predictors, enabling parallel processing in this case will certainly help in training the model fast.
+```{r echo=TRUE, eval=TRUE, message=FALSE, comment=""}
+# Creating cluster based on the available CPU cores. It's conventional to leave 1 core for OS
+cluster <- makeCluster(detectCores() - 1)
+registerDoParallel(cluster)
 ```
 
-Note that the `echo = FALSE` parameter was added to the code chunk to prevent printing of the R code that generated the plot.
+#### 6. **Adding Cross Validation**
+Peforming cross-validation is almost always a good idea to help reducing the in and out of sample error. Here, we are going to use K-fold validation
+with number = 5.
+```{r echo=TRUE, eval=TRUE, message=FALSE, comment=""}
+train.control <- trainControl(method = "cv", number = 5, allowParallel = TRUE)
+```
+Notice that we have set parameter "allowParallel" to enable parallel processing based on the configuration we just added.
+
+#### 7. **Train the Model**
+Everything set, now we are ready to train our model. We are going to use "random forest" with caret::train for this.
+```{r echo=TRUE, eval=TRUE, message=FALSE, comment=""}
+mf <- train(classe ~., data = training, method = "rf", trControl = train.control)
+stopCluster(cluster)   # Stopping the parallel processing
+registerDoSEQ()
+mf                     # Printing the model
+```
+
+#### 8. **Analyzing the Model**
+The model has 53 predictors and the predicted variable (classe) is a factor with 5 values. No pre-processing has been performed. As requested, the model used 5-fold cross validation. The final model used 27 predictors to give the accuracy of 99.66%. That means an in-sample error of 0.33% (1 - accuracy).
+
+#### 9. **Making predictions on test-set**
+Now, let's apply the model on test dataset.
+```{r echo=TRUE, eval=TRUE, message=FALSE, comment=""}
+pred <- predict(mf, testing)
+confusionMatrix(pred, testing$classe)
+```
+The model, when applied to test-set, has an accuracy of 99.59% which is pretty close to training model accuracy. That means it's a pretty well tuned. Let's check the variable importance chart which is quite useful in case we decide to further tune the model.
+```{r echo=TRUE, eval=TRUE, message=FALSE, comment=""}
+plot(varImp(mf, scale = FALSE))
+```
+
+It's evident from the graph that the variable "num_window" has the maximum importance amoung the selected variables.
+
+#### 10. **Calculating out-of-sample error**
+Another way to calculate the model "accuracy" is to manually calculate it as follows:
+```{r echo=TRUE, eval=TRUE, message=FALSE, comment=""}
+outOfSampleAccuracy <- sum(pred == testing$classe) / length(pred)
+outOfSampleError    <- 1 - outOfSampleAccuracy
+print(paste("Out-of-Sample Error:", round(outOfSampleError * 100, 2), "%"))
+```
+#### 11. **Quiz Result**
+```{r echo=TRUE, eval=FALSE, message=FALSE, comment=""}
+predQuiz <- predict(mf, finalTest)
+predQuiz
+```
+As per the honor code, the result is not published. But if you have come so far, you already know the solution.
